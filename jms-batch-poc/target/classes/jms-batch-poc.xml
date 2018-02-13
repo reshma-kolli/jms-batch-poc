@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:objectstore="http://www.mulesoft.org/schema/mule/objectstore" xmlns:metadata="http://www.mulesoft.org/schema/mule/metadata" xmlns:file="http://www.mulesoft.org/schema/mule/file" xmlns:dw="http://www.mulesoft.org/schema/mule/ee/dw" xmlns:jms="http://www.mulesoft.org/schema/mule/jms" xmlns:batch="http://www.mulesoft.org/schema/mule/batch" xmlns:tracking="http://www.mulesoft.org/schema/mule/ee/tracking" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:spring="http://www.springframework.org/schema/beans" 
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-current.xsd
+http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/file http://www.mulesoft.org/schema/mule/file/current/mule-file.xsd
+http://www.mulesoft.org/schema/mule/batch http://www.mulesoft.org/schema/mule/batch/current/mule-batch.xsd
+http://www.mulesoft.org/schema/mule/ee/dw http://www.mulesoft.org/schema/mule/ee/dw/current/dw.xsd
+http://www.mulesoft.org/schema/mule/jms http://www.mulesoft.org/schema/mule/jms/current/mule-jms.xsd
+http://www.mulesoft.org/schema/mule/ee/tracking http://www.mulesoft.org/schema/mule/ee/tracking/current/mule-tracking-ee.xsd
+http://www.mulesoft.org/schema/mule/objectstore http://www.mulesoft.org/schema/mule/objectstore/current/mule-objectstore.xsd">
+    <jms:activemq-connector name="Active_MQ" specification="1.1" brokerURL="tcp://localhost:61616" validateConnections="true" doc:name="Active MQ" password="admin" username="admin"/>
+    <objectstore:config name="ObjectStore__Connector" partition="messages" objectStore-ref="_defaultUserObjectStore" doc:name="ObjectStore: Connector"/>
+    <flow name="jms-batch-pocFlow">
+        <file:inbound-endpoint path="src/main/resources/in" moveToDirectory="src/main/resources/archieve" responseTimeout="10000" doc:name="File"/>
+        <set-variable variableName="startVal" value="#[0]" doc:name="countVariable"/>
+        <objectstore:store config-ref="ObjectStore__Connector" key="NumberOfMsgSent" value-ref="#[flowVars.startVal]" doc:name="SetSentMsgCount_ObjectStore" overwrite="true"/>
+        <objectstore:store config-ref="ObjectStore__Connector" key="NumberOfMsgReceive" value-ref="#[flowVars.startVal]" doc:name="SetReceiveMsgCount_ObjectStore" overwrite="true"/>
+        <batch:execute name="jms-batch-pocBatch" doc:name="jms-batch-pocBatch"/>
+    </flow>
+    <batch:job name="jms-batch-pocBatch">
+        <batch:input>
+            <dw:transform-message doc:name="Transform Message" metadata:id="776a25be-9224-4208-bdc9-246372fc3874">
+                <dw:input-payload mimeType="application/csv"/>
+                <dw:set-payload><![CDATA[%dw 1.0
+%output application/java
+---
+payload as :iterator]]></dw:set-payload>
+            </dw:transform-message>
+        </batch:input>
+        <batch:process-records>
+            <batch:step name="Batch_Step">
+                <object-to-string-transformer doc:name="Object to String"/>
+                <jms:outbound-endpoint queue="sampleQ" connector-ref="Active_MQ" doc:name="JMS"/>
+                <objectstore:retrieve config-ref="ObjectStore__Connector" key="NumberOfMsgSent" targetProperty="NoOfMsgSent" doc:name="RetriveSentMsgCount_ObjectStore"/>
+                <objectstore:store config-ref="ObjectStore__Connector" key="NumberOfMsgSent" value-ref="#[Integer.parseInt(flowVars.NoOfMsgSent) + 1]" overwrite="true" doc:name="UpdateSentMsgCount_ObjectStore"/>
+            </batch:step>
+        </batch:process-records>
+        <batch:on-complete>
+            <logger message="#[payload]--------onComplete Phase-------" level="INFO" doc:name="Logger"/>
+            <expression-component doc:name="StartTargetFlow_Expression"><![CDATA[app.registry.targetFlow.start();]]></expression-component>
+        </batch:on-complete>
+    </batch:job>
+    <flow name="targetFlow" initialState="stopped" processingStrategy="synchronous">
+        <jms:inbound-endpoint queue="sampleQ" connector-ref="Active_MQ" doc:name="JMS"/>
+        <objectstore:retrieve config-ref="ObjectStore__Connector" key="NumberOfMsgReceive" targetProperty="NoOfMsgReceive" doc:name="RetriveReceiveMsgCount_ObjectStore"/>
+        <objectstore:store config-ref="ObjectStore__Connector" key="NumberOfMsgReceive" value-ref="#[Integer.parseInt(flowVars.NoOfMsgReceive) + 1]" overwrite="true" doc:name="UpdateReceiveMsgCount_ObjectStore"/>
+        <logger message="jms listener started------#[message.payloadAs(java.lang.String)]======" level="INFO" doc:name="Logger"/>
+        <objectstore:retrieve config-ref="ObjectStore__Connector" key="NumberOfMsgSent" targetProperty="NoOfMsgSent" doc:name="RetrieveSentMsgCount_ObjectStore"/>
+        <logger message="comparison ===== #[flowVars.NoOfMsgReceive == (flowVars.NoOfMsgSent - 1)]--------#[flowVars.NoOfMsgSent]#[ flowVars.NoOfMsgReceive]" level="INFO" doc:name="Logger"/>
+        <choice doc:name="Choice">
+            <when expression="#[flowVars.NoOfMsgReceive == flowVars.NoOfMsgSent - 1]">
+                <expression-component doc:name="StopTargetFlow_Expression"><![CDATA[app.registry.targetFlow.stop();
+]]></expression-component>
+            </when>
+            <otherwise>
+                <logger message="==========STILL READING MESSAGES============" level="INFO" doc:name="Logger"/>
+            </otherwise>
+        </choice>
+    </flow>
+</mule>
